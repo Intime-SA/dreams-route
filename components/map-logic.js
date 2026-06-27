@@ -6,12 +6,15 @@ export default function initRutaVelero() {
   // ===== Estilos extra =====
   const css = document.createElement("style");
   css.textContent = `
-    .pp .ppgal{margin-bottom:8px}
-    .pp .hero{width:100%;height:140px;border-radius:9px;object-fit:cover;background:#eef0f3;display:block}
-    .pp .heroph{width:100%;height:140px;border-radius:9px;display:flex;align-items:center;justify-content:center;color:#9aa0a6;background:linear-gradient(135deg,#eef2f7,#e1e7f0);font-size:12px}
-    .pp .thumbs{display:flex;gap:5px;margin-top:5px;overflow-x:auto;padding-bottom:2px}
-    .pp .thumbs img{width:48px;height:36px;object-fit:cover;border-radius:5px;cursor:pointer;flex:0 0 auto;border:2px solid transparent}
-    .pp .thumbs img.sel{border-color:#1a73e8}
+    .pp .ptabs{display:flex;gap:4px;margin-bottom:6px}
+    .pp .ptabs button{flex:1;border:1px solid #d7dce5;background:#fff;border-radius:7px;font-size:10px;font-weight:600;color:#5f6368;padding:5px 2px;cursor:pointer}
+    .pp .ptabs button.on{background:#1a73e8;border-color:#1a73e8;color:#fff}
+    .pp .pmapwrap{position:relative;margin-bottom:8px}
+    .pp .pmap{height:152px;border-radius:9px;overflow:hidden;background:#dfe6ee}
+    .pp .pmaplbl{position:absolute;left:6px;bottom:6px;z-index:500;background:rgba(255,255,255,.85);border-radius:5px;padding:1px 6px;font-size:9px;color:#5f6368;pointer-events:none}
+    .pp .pphotos{display:flex;gap:5px;overflow-x:auto;height:152px;margin-bottom:8px}
+    .pp .pphotos img{height:152px;border-radius:8px;object-fit:cover;flex:0 0 auto;min-width:118px;cursor:pointer}
+    .pp .pphotos .heroph{width:100%;height:152px;border-radius:9px;display:flex;align-items:center;justify-content:center;color:#9aa0a6;background:linear-gradient(135deg,#eef2f7,#e1e7f0);font-size:12px}
     .pp h3{margin:0 0 1px;font-size:14px;font-weight:600}
     .pp .ppc{font-size:11px;color:#5f6368;margin-bottom:6px}
     .pp .ppinfo{font-size:12px;line-height:1.4;margin-bottom:6px}
@@ -113,6 +116,10 @@ export default function initRutaVelero() {
     attribution:'© OpenStreetMap © CARTO',subdomains:'abcd',maxZoom:19}).addTo(map);
   function curBounds(){const b=L.latLngBounds(WP.map(w=>w[2]));b.extend([41.5,-74]);b.extend([-38,-60]);return b;}
   map.fitBounds(curBounds(),{padding:[40,40]});
+
+  // mini-mapa de los popups (satélite Esri / callejero OSM)
+  let pmap=null, esriLayer=null, cartoLayer=null;
+  map.on('popupclose',()=>{ if(pmap){pmap.remove();pmap=null;} });
 
   function fullPath(){const fp=[WP[0][2]];for(let i=1;i<WP.length;i++)legPts(i).slice(1).forEach(p=>fp.push(p));return fp;}
 
@@ -259,16 +266,54 @@ export default function initRutaVelero() {
     return [];
   }
 
-  // ===== Popup de puerto (galería + ficha náutica + links) =====
+  // ===== Mini-mapa del popup =====
+  const ESRI='https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}';
+  const CARTO='https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png';
+  function buildMini(coords){
+    if(pmap){pmap.remove();pmap=null;}
+    const el=document.getElementById('pmap'); if(!el) return;
+    pmap=L.map(el,{zoomControl:true,attributionControl:false}).setView(coords,12);
+    esriLayer=L.tileLayer(ESRI,{maxZoom:18});
+    cartoLayer=L.tileLayer(CARTO,{subdomains:'abcd',maxZoom:19});
+    esriLayer.addTo(pmap);
+    L.circleMarker(coords,{radius:5,color:'#fff',weight:2,fillColor:'#1a73e8',fillOpacity:1}).addTo(pmap);
+    setTimeout(()=>{ if(pmap) pmap.invalidateSize(); },70);
+  }
+  function miniView(coords,k){
+    if(!pmap) return;
+    const lbl=document.querySelector('.pp .pmaplbl');
+    if(k==='calles'){
+      if(pmap.hasLayer(esriLayer)) pmap.removeLayer(esriLayer); cartoLayer.addTo(pmap);
+      pmap.setView(coords,16); if(lbl) lbl.textContent='© OpenStreetMap · calles cercanas';
+    } else if(k==='puerto'){
+      if(pmap.hasLayer(cartoLayer)) pmap.removeLayer(cartoLayer); esriLayer.addTo(pmap);
+      pmap.setView(coords,16); if(lbl) lbl.textContent='Esri World Imagery · puerto/fondeadero';
+    } else { // costa
+      if(pmap.hasLayer(cartoLayer)) pmap.removeLayer(cartoLayer); esriLayer.addTo(pmap);
+      pmap.setView(coords,11); if(lbl) lbl.textContent='Esri World Imagery · costa';
+    }
+    setTimeout(()=>{ if(pmap) pmap.invalidateSize(); },40);
+  }
+  function loadPhotos(box,title){
+    if(box.dataset.loaded) return; box.dataset.loaded='1';
+    box.innerHTML='<div class="heroph">📷 cargando fotos…</div>';
+    if(!title){ box.innerHTML='<div class="heroph">parada propia · sin fotos</div>'; return; }
+    cityImages(title).then(imgs=>{
+      if(!imgs.length){ box.innerHTML='<div class="heroph">sin fotos disponibles</div>'; return; }
+      box.innerHTML=imgs.map(s=>`<img src="${s}" alt="">`).join('');
+    });
+  }
+
+  // ===== Popup de puerto (mini-mapa satélite/puerto/calles + fotos + ficha + links) =====
   function openPort(i){
-    const w=WP[i],r=REGIONS[w[5]],custom=w[5]==='custom',nav=w[12];
+    const w=WP[i],r=REGIONS[w[5]],custom=w[5]==='custom',nav=w[12],coords=w[2];
     const restTxt=w[7]>0?`${w[7]} días`:'escala corta';
     const badge=w[8]?'<span class="badge rec">puerto de recalada</span>':(custom?'<span class="badge short">parada propia</span>':'<span class="badge short">escala de tránsito</span>');
     const climate=custom?'Parada personalizada · ruta local':`${r.label} · ${r.months} · agua ${r.water}`;
     const q=encodeURIComponent((w[10]||w[0]).replace(/\s*\(.*?\)\s*/,' ').trim());
     const noon=`https://www.noonsite.com/?s=${q}`;
     const navi=`https://www.google.com/search?q=site:navily.com+${q}`;
-    const maps=`https://www.google.com/maps/search/?api=1&query=${w[2][0]},${w[2][1]}`;
+    const maps=`https://www.google.com/maps/search/?api=1&query=${coords[0]},${coords[1]}`;
     const navBlock = nav ? `
       <div class="nav">
         <div class="c">Tipo<b>${nav.t}</b></div>
@@ -286,7 +331,14 @@ export default function initRutaVelero() {
         <a href="${maps}" target="_blank" rel="noopener">📍 Mapa</a>
       </div>`;
     const html=`<div class="pp">
-      <div class="ppgal" id="ppgal"><div class="heroph">📷 cargando fotos…</div></div>
+      <div class="ptabs">
+        <button data-k="costa" class="on">🛰️ Costa</button>
+        <button data-k="puerto">⚓ Puerto</button>
+        <button data-k="calles">🗺️ Calles</button>
+        <button data-k="fotos">📷 Fotos</button>
+      </div>
+      <div class="pmapwrap" id="pmapwrap"><div class="pmap" id="pmap"></div><div class="pmaplbl">Esri World Imagery · costa</div></div>
+      <div class="pphotos" id="pphotos" hidden></div>
       <h3>${w[1]} ${w[0]}</h3>
       <div class="ppc">${climate}</div>
       <div class="ppinfo">${w[11]||''}</div>
@@ -297,21 +349,21 @@ export default function initRutaVelero() {
       </div>
       ${links}
       ${rm}
-      ${nav?'<div class="ppcredit">Datos orientativos · fotos Wikipedia · confirmá en los links</div>':''}
+      ${nav?'<div class="ppcredit">Datos orientativos · imágenes Esri/OSM/Wikipedia · confirmá en los links</div>':''}
     </div>`;
-    markers[i].bindPopup(html,{maxWidth:300,minWidth:260}).openPopup();
+    markers[i].bindPopup(html,{maxWidth:300,minWidth:262}).openPopup();
     if(custom) setTimeout(()=>{const b=document.getElementById('rmBtn');if(b)b.onclick=()=>removeWaypoint(i);},0);
-    if(w[10]) cityImages(w[10]).then(imgs=>{
-      const gal=document.getElementById('ppgal'); if(!gal) return;
-      if(!imgs.length){ gal.innerHTML='<div class="heroph">sin imagen disponible</div>'; return; }
-      gal.innerHTML=`<img class="hero" id="heroimg" src="${imgs[0]}" alt="">`+
-        (imgs.length>1?`<div class="thumbs">${imgs.map((s,k)=>`<img data-i="${k}" class="${k===0?'sel':''}" src="${s}">`).join('')}</div>`:'');
-      const hero=document.getElementById('heroimg');
-      gal.querySelectorAll('.thumbs img').forEach(t=>t.onclick=()=>{
-        hero.src=imgs[+t.dataset.i];
-        gal.querySelectorAll('.thumbs img').forEach(x=>x.classList.remove('sel')); t.classList.add('sel');
+    setTimeout(()=>{
+      buildMini(coords);
+      const tabs=document.querySelectorAll('.pp .ptabs button');
+      const wrap=document.getElementById('pmapwrap'), ph=document.getElementById('pphotos');
+      tabs.forEach(b=>b.onclick=()=>{
+        tabs.forEach(x=>x.classList.remove('on')); b.classList.add('on');
+        const k=b.dataset.k;
+        if(k==='fotos'){ wrap.hidden=true; ph.hidden=false; loadPhotos(ph,w[10]); }
+        else { ph.hidden=true; wrap.hidden=false; miniView(coords,k); }
       });
-    });
+    },80);
   }
 
   // ===== Agregar / quitar paradas =====
